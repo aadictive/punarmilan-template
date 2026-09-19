@@ -1,0 +1,6 @@
+pytest
+pyyaml
+boto3
+stripe==11.1.1
+qrcode==7.4.2
+Pillow

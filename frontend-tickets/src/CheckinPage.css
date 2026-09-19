@@ -1,0 +1,218 @@
+.checkin-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 32px 16px;
+  background: var(--paper);
+}
+
+.checkin-card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--maroon);
+  padding: 24px;
+  text-align: center;
+}
+
+.checkin-card h1 {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 24px;
+  margin: 0 0 6px;
+  color: var(--ink);
+}
+
+.checkin-count {
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin: 0 0 16px;
+}
+
+.checkin-scanner {
+  width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #111;
+  margin-bottom: 12px;
+}
+
+.checkin-scanner:not(.active) {
+  display: none;
+}
+
+.checkin-btn {
+  display: block;
+  width: 100%;
+  padding: 14px 20px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: var(--body);
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+
+.checkin-btn-primary {
+  background: var(--maroon);
+  color: var(--white);
+  border: none;
+}
+
+.checkin-btn-secondary {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.checkin-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.checkin-manual {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.checkin-manual input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--body);
+  font-size: 15px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  text-transform: uppercase;
+}
+
+.checkin-manual .checkin-btn {
+  width: auto;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.checkin-result {
+  margin-top: 16px;
+  padding: 20px 16px;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.checkin-result-icon {
+  font-size: 40px;
+  margin: 0 0 8px;
+}
+
+.checkin-result-name {
+  font-family: var(--display);
+  font-size: 20px;
+  font-weight: 500;
+  margin: 0 0 4px;
+  color: var(--ink);
+}
+
+.checkin-result-sub {
+  font-family: var(--body);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+.checkin-result-message {
+  font-size: 14px;
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.checkin-result-success {
+  background: rgba(76, 130, 84, 0.12);
+  border: 1px solid rgba(76, 130, 84, 0.35);
+}
+
+.checkin-result-warning {
+  background: rgba(176, 141, 62, 0.15);
+  border: 1px solid rgba(176, 141, 62, 0.4);
+}
+
+.checkin-result-error {
+  background: rgba(122, 46, 46, 0.1);
+  border: 1px solid rgba(122, 46, 46, 0.35);
+}
+
+.checkin-result-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  margin: 0 0 8px;
+}
+
+/* --- Verification modal: same info as the result box above, but front and
+   center so it can't be missed mid-scan. --- */
+
+.checkin-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(27, 42, 74, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+
+.checkin-modal {
+  width: 100%;
+  max-width: 380px;
+  background: var(--white);
+  border-radius: 10px;
+  padding: 28px 24px 20px;
+  text-align: center;
+  box-shadow: 0 12px 32px rgba(27, 42, 74, 0.25);
+  border-top: 5px solid var(--ink-soft);
+}
+
+.checkin-modal-success { border-top-color: #4C8254; }
+.checkin-modal-warning { border-top-color: var(--gold); }
+.checkin-modal-error { border-top-color: var(--maroon); }
+
+.checkin-modal-icon {
+  font-size: 56px;
+  margin: 0 0 10px;
+}
+
+.checkin-modal-name {
+  font-family: var(--display);
+  font-size: 24px;
+  font-weight: 500;
+  margin: 0 0 6px;
+  color: var(--ink);
+}
+
+.checkin-modal-sub {
+  font-family: var(--body);
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+.checkin-modal-message {
+  font-size: 15px;
+  margin: 0 0 20px;
+  color: var(--ink-soft);
+}
+
+.checkin-modal-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.checkin-modal-actions .checkin-btn {
+  margin-bottom: 0;
+}

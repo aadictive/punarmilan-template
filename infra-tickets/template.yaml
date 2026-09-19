@@ -1,0 +1,566 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Punarmilan - The Reunion: ticketing site for one chapter event (registration,
+  card + Venmo/Zelle payments, e-tickets, door check-in, admin panel, invites).
+  One stack per chapter/event. Everything is named from the stack name, so many
+  chapters can live side by side in one AWS account without colliding. Also
+  provisions the website hosting (private S3 bucket + CloudFront). Deployed by
+  scripts/deploy.sh / the GitHub Action - see README.md.
+
+Parameters:
+  AdminPassword:
+    Type: String
+    NoEcho: true
+    Description: Full-access password for the tickets admin page
+  ViewOnlyPassword:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >
+      Read-only password for the tickets admin page - can view/search/filter
+      and export CSV, but every mutating action (mark paid, refund, send
+      reminder, check-in) still only accepts AdminPassword. Leave blank to
+      disable view-only login entirely.
+  TicketPriceCents:
+    Type: Number
+    Default: 6500
+    Description: Price per ticket, in cents (6500 = $65.00). Change any time with `sam deploy --parameter-overrides TicketPriceCents=NNNN` - no code/frontend changes needed.
+  StripeSecretKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Stripe secret key (sk_live_... or sk_test_...). Leave blank until you have a Stripe account - "Pay by card" will cleanly report unavailable until this is set.
+  StripeWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Stripe webhook signing secret. Set after registering the WebhookEndpoint output URL in the Stripe Dashboard.
+  VenmoHandle:
+    Type: String
+    Default: ""
+    Description: e.g. "@your-chapter-venmo" - shown to attendees as a manual payment option. Leave blank to hide it.
+  ZelleHandle:
+    Type: String
+    Default: ""
+    Description: e.g. an email or phone number - shown to attendees as a manual payment option. Leave blank to hide it.
+  SenderEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Gmail address to send registration/payment emails from (also the SMTP
+      username). Leave blank to skip sending entirely.
+  GmailAppPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Gmail App Password for SenderEmail (Google Account -> Security -> 2-Step
+      Verification -> App passwords). Requires 2-Step Verification to be enabled
+      on that account; the regular account password will not work for SMTP.
+  CheckinKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Long random token (e.g. `openssl rand -hex 16`) that gates the door
+      check-in page - it's embedded in that page's URL as ?key=..., so give
+      volunteers the link rather than a password. Anyone with the link can
+      check attendees in, so don't post it publicly.
+
+  CustomSiteOrigin:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. Only set this if you put your own domain in front of the
+      CloudFront distribution (e.g. https://tickets.example.org, no trailing
+      slash). Leave blank to use the distribution's own *.cloudfront.net URL,
+      which is what CORS and the Stripe redirect URLs default to.
+
+Conditions:
+  HasCustomOrigin: !Not [!Equals [!Ref CustomSiteOrigin, ""]]
+
+Resources:
+  # Attendee data lives here - keep it even if the stack is deleted, and keep
+  # point-in-time recovery on so an accidental bad write can be rolled back.
+  TicketsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+
+  # ---------------------------------------------------------------------
+  # Website hosting: private S3 bucket served only through CloudFront (OAC).
+  # scripts/deploy.sh syncs the built frontend into SiteBucket afterwards.
+  # ---------------------------------------------------------------------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  SiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-site-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} ticketing site"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: site-bucket
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: site-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          # AWS-managed "CachingOptimized" policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # The site is a single-page app (/admin, /checkin, /decline are
+        # client-side routes): a private bucket answers unknown paths with
+        # 403, so send those back to index.html and let React Router decide.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}"
+
+  RegisterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: register_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          TICKET_PRICE_CENTS: !Ref TicketPriceCents
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  ConfigFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: config_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          TICKET_PRICE_CENTS: !Ref TicketPriceCents
+          STRIPE_SECRET_KEY: !Ref StripeSecretKey
+          VENMO_HANDLE: !Ref VenmoHandle
+          ZELLE_HANDLE: !Ref ZelleHandle
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  CheckoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: create_checkout_session_handler.handler
+      Runtime: python3.12
+      Timeout: 20
+      MemorySize: 512
+      # 512MB (not 128) because `import stripe` alone pulls in ~570 files -
+      # on 128MB's small CPU share that cold-start import alone can exceed
+      # a 15s timeout. More memory = more CPU = fast enough import.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          STRIPE_SECRET_KEY: !Ref StripeSecretKey
+          SUCCESS_URL: !If [HasCustomOrigin, !Sub "${CustomSiteOrigin}/?paid=1", !Sub "https://${SiteDistribution.DomainName}/?paid=1"]
+          CANCEL_URL: !If [HasCustomOrigin, !Sub "${CustomSiteOrigin}/", !Sub "https://${SiteDistribution.DomainName}/"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  StripeWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: stripe_webhook_handler.handler
+      Runtime: python3.12
+      Timeout: 20
+      MemorySize: 512
+      # See CheckoutFunction comment - `import stripe` needs the extra CPU
+      # that comes with more memory to import fast enough on a cold start.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          STRIPE_WEBHOOK_SECRET: !Ref StripeWebhookSecret
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+        # No CORS needed - Stripe calls this server-to-server, not from a browser.
+
+  TicketsAdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: tickets_admin_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          VIEW_ONLY_PASSWORD: !Ref ViewOnlyPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  SelectMethodFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: select_method_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  SendInstructionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: send_instructions_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+          VENMO_HANDLE: !Ref VenmoHandle
+          ZELLE_HANDLE: !Ref ZelleHandle
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  SendReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: send_payment_reminder_handler.handler
+      Runtime: python3.12
+      Timeout: 20
+      MemorySize: 512
+      # See CheckoutFunction comment - `import stripe` needs the extra CPU
+      # that comes with more memory to import fast enough on a cold start.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          STRIPE_SECRET_KEY: !Ref StripeSecretKey
+          SUCCESS_URL: !If [HasCustomOrigin, !Sub "${CustomSiteOrigin}/?paid=1", !Sub "https://${SiteDistribution.DomainName}/?paid=1"]
+          CANCEL_URL: !If [HasCustomOrigin, !Sub "${CustomSiteOrigin}/", !Sub "https://${SiteDistribution.DomainName}/"]
+          VENMO_HANDLE: !Ref VenmoHandle
+          ZELLE_HANDLE: !Ref ZelleHandle
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  AdminCheckinFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: admin_checkin_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  AdminSendEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: admin_send_email_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  DeclineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: decline_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  SendInviteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: send_invite_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          SUCCESS_URL: !If [HasCustomOrigin, !Sub "${CustomSiteOrigin}/?paid=1", !Sub "https://${SiteDistribution.DomainName}/?paid=1"]
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  TrackViewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: track_view_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          TICKET_PRICE_CENTS: !Ref TicketPriceCents
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  MarkPaidFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: mark_paid_handler.handler
+      Runtime: python3.12
+      Timeout: 15
+      MemorySize: 256
+      # Sends the confirmation e-ticket email, which generates a QR code via
+      # qrcode+Pillow - extra memory/CPU keeps that fast on a cold start.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  UnmarkPaidFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: unmark_paid_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          ADMIN_PASSWORD: !Ref AdminPassword
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+          SENDER_EMAIL: !Ref SenderEmail
+          GMAIL_APP_PASSWORD: !Ref GmailAppPassword
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  CheckinFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend-tickets/
+      Handler: checkin_handler.handler
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TicketsTable
+          CHECKIN_KEY: !Ref CheckinKey
+          ALLOWED_ORIGIN: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TicketsTable
+      FunctionUrlConfig:
+        AuthType: NONE
+
+Outputs:
+  RegisterEndpoint:
+    Description: POST this from the registration form
+    Value: !GetAtt RegisterFunctionUrl.FunctionUrl
+  ConfigEndpoint:
+    Description: GET this on page load for live price / payment method availability
+    Value: !GetAtt ConfigFunctionUrl.FunctionUrl
+  CheckoutEndpoint:
+    Description: POST this to start a Stripe Checkout session
+    Value: !GetAtt CheckoutFunctionUrl.FunctionUrl
+  WebhookEndpoint:
+    Description: Register this URL in the Stripe Dashboard (Developers -> Webhooks) once you have a Stripe account
+    Value: !GetAtt StripeWebhookFunctionUrl.FunctionUrl
+  AdminEndpoint:
+    Description: GET this from the tickets admin page (needs X-Admin-Password header)
+    Value: !GetAtt TicketsAdminFunctionUrl.FunctionUrl
+  MarkPaidEndpoint:
+    Description: POST this to manually mark a Venmo/Zelle payment as received (needs X-Admin-Password header)
+    Value: !GetAtt MarkPaidFunctionUrl.FunctionUrl
+  SelectMethodEndpoint:
+    Description: POST this when an attendee picks a payment method, to record intent before payment is confirmed
+    Value: !GetAtt SelectMethodFunctionUrl.FunctionUrl
+  SendInstructionsEndpoint:
+    Description: POST this when an attendee clicks "Send payment instructions" for Venmo/Zelle
+    Value: !GetAtt SendInstructionsFunctionUrl.FunctionUrl
+  TrackViewEndpoint:
+    Description: POST this when an attendee reaches the confirm-email/price screen, for drop-off stats
+    Value: !GetAtt TrackViewFunctionUrl.FunctionUrl
+  UnmarkPaidEndpoint:
+    Description: POST this to undo a "Mark paid" click (needs X-Admin-Password header)
+    Value: !GetAtt UnmarkPaidFunctionUrl.FunctionUrl
+  CheckinEndpoint:
+    Description: POST this from the door check-in page (needs the CheckinKey in the request body)
+    Value: !GetAtt CheckinFunctionUrl.FunctionUrl
+  SendReminderEndpoint:
+    Description: POST this from the admin page to nudge a still-unpaid registration (needs X-Admin-Password header)
+    Value: !GetAtt SendReminderFunctionUrl.FunctionUrl
+  AdminCheckinEndpoint:
+    Description: POST this from the admin page to manually check someone in or undo a check-in (needs X-Admin-Password header)
+    Value: !GetAtt AdminCheckinFunctionUrl.FunctionUrl
+  AdminSendEmailEndpoint:
+    Description: POST this from the admin page to resend a confirmation or send the day-before event reminder (needs X-Admin-Password header, body {email, template})
+    Value: !GetAtt AdminSendEmailFunctionUrl.FunctionUrl
+  DeclineEndpoint:
+    Description: POST this from the /decline landing page (public, no auth) with body {email, name}
+    Value: !GetAtt DeclineFunctionUrl.FunctionUrl
+  SendInviteEndpoint:
+    Description: POST this from the invite mail-merge Apps Script (needs X-Admin-Password header, body {name, email})
+    Value: !GetAtt SendInviteFunctionUrl.FunctionUrl
+  SiteBucketName:
+    Description: S3 bucket the built frontend is synced into
+    Value: !Ref SiteBucket
+  DistributionId:
+    Description: CloudFront distribution id (used for cache invalidation after a frontend deploy)
+    Value: !Ref SiteDistribution
+  SiteUrl:
+    Description: The public URL of the ticketing site - share this (or a short link to it) with attendees
+    Value: !If [HasCustomOrigin, !Ref CustomSiteOrigin, !Sub "https://${SiteDistribution.DomainName}"]

@@ -1,0 +1,91 @@
+# =============================================================================
+#  chapter.config.yaml  -  the ONE file you edit to make this site yours
+# =============================================================================
+#  Everything here is PUBLIC-SAFE: it ends up in emails and on the website.
+#  Never put a password, API key or token in this file - those go in GitHub
+#  "Secrets" (see README.md, step 5). Lines starting with # are comments.
+#
+#  How to edit: on GitHub, open this file and click the pencil icon (Edit),
+#  change the text between the quotes, then "Commit changes". The site
+#  redeploys itself a few minutes later.
+#
+#  Keep the quotation marks. If your text itself contains a double quote ("),
+#  write it as \"  instead.
+# =============================================================================
+
+# --- Identity ---------------------------------------------------------------
+# A short lowercase id for THIS site. Letters, numbers and hyphens only,
+# 3-20 characters, starting with a letter. It becomes the name of your AWS
+# stack, so it can never be changed after the first deploy without creating a
+# brand-new site. Example: "somaiya-chicago"
+chapter_id: "sample-chapter"
+
+# Fixed across every chapter - leave as is.
+product_name: "Punarmilan - The Reunion"
+
+# Your chapter's full name, shown in email signatures.
+chapter_name: "Somaiya Sample City Alumni Chapter"
+
+# --- The event --------------------------------------------------------------
+event:
+  name: "Somaiya Alumni Meet"
+  # Date as YYYY-MM-DD. The weekday, "October 18, 2026" style text, the short
+  # "Oct 18" and the calendar badge on the site are all worked out from this.
+  date: "2026-10-18"
+  time: "12:00 PM – 4:00 PM"
+  # Shown above the event name on the website, e.g. "Chicago" or "Bay Area".
+  city: "Sample City"
+  venue_name: "The Example Hall"
+  venue_address: "123 Example Street, Sample City, ST 00000"
+  # Paste a Google Maps share link (Share -> Copy link). Leave "" to hide it.
+  venue_maps_url: ""
+
+# --- Who attendees should contact ---------------------------------------------
+contact:
+  name: "Alex Sample"
+  title: "Chapter Lead"
+  phone: "+1 (555) 010-0100"
+  email: "chapter-lead@example.com"
+
+# Invite link to your WhatsApp group. Leave "" and the "join our WhatsApp
+# group" line is simply left out of the emails.
+whatsapp_group_url: ""
+
+# A short link people can type or tap, e.g. a short link from a link-shortener that points at
+# your site. Only used to fill {registration_link} in content/whatsapp_message.md
+# and content/linkedin_post.md. Leave "" until you have one.
+short_link: ""
+
+# --- Tickets and payments ---------------------------------------------------
+tickets:
+  # Price per ticket in US dollars (decimals are fine: 65 or 65.50).
+  price_usd: 65
+
+payments:
+  # Venmo and Zelle are manual payments - attendees pay you in their own app
+  # and you tick "Mark paid" in the admin page. Leave a handle "" to hide that
+  # option entirely. Also replace assets/venmo-qr.png and assets/zelle-qr.png
+  # with screenshots of YOUR QR codes (see README.md, step 4).
+  venmo_handle: ""          # e.g. "@your-chapter"
+  zelle_handle: ""          # e.g. "chapter@example.com" or a phone number
+  # Card payments (Stripe) switch on automatically as soon as you add the
+  # STRIPE_SECRET_KEY secret. Leave that secret out for a Venmo/Zelle-only site.
+
+# --- Email --------------------------------------------------------------------
+email:
+  # The Gmail address confirmation emails are sent from. Use a dedicated
+  # account for your chapter (a normal Gmail sends about 500 emails a day).
+  # Its "App Password" goes in the GMAIL_APP_PASSWORD secret.
+  sender_email: "chapter-emails@example.com"
+
+# --- Registration form ------------------------------------------------------
+registration_form:
+  # The "What are you most looking forward to?" tick-boxes. 2 to 8 items.
+  expectation_options:
+    - "Networking & new connections"
+    - "Reconnecting with old friends"
+    - "Business / career opportunities"
+    - "Meeting the Somaiya leadership team"
+    - "Nostalgia & good food"
+  # Grey hint text inside the "College / institution" box.
+  college_placeholder: "e.g. KJSCE"

@@ -1,0 +1,83 @@
+# Deploys this chapter's site to AWS every time you commit a change to the
+# "main" branch (for example after editing chapter.config.yaml on GitHub).
+# You can also run it by hand: Actions tab -> "Deploy site" -> Run workflow.
+#
+# It needs the repository secrets described in README.md (step 5):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, ADMIN_PASSWORD, CHECKIN_KEY
+# plus these optional ones: VIEW_ONLY_PASSWORD, GMAIL_APP_PASSWORD,
+# STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+# and, optionally, these repository *variables*: AWS_REGION, ARTIFACT_BUCKET.
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "generated/**"
+  workflow_dispatch:
+
+# Never run two deploys at once for the same site.
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Skip on the template repository itself (it has no secrets); every copy made
+    # with "Use this template" is a normal repository and deploys as usual.
+    if: ${{ !github.event.repository.is_template }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend-tickets/package-lock.json
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Check the settings file and run the tests
+        run: |
+          pip install -r requirements-dev.txt
+          python3 scripts/prepare.py --strict
+          python3 -m pytest tests -q
+
+      - name: Keep the WhatsApp / LinkedIn drafts (download from the run's Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: message-drafts
+          path: generated/
+          retention-days: 14
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Deploy
+        env:
+          ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          CHECKIN_KEY: ${{ secrets.CHECKIN_KEY }}
+          VIEW_ONLY_PASSWORD: ${{ secrets.VIEW_ONLY_PASSWORD }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+        run: bash scripts/deploy.sh
